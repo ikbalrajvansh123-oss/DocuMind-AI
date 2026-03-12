@@ -1,40 +1,155 @@
-from dotenv import load_dotenv
+import streamlit as st
 import os
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import initialize_agent, AgentType
-from langchain.tools import Tool
-from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
 
-# Load environment variables
-load_dotenv()
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
-# Gemini LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-pro",
-    temperature=0.3
-)
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq
 
-# Free Search Wrapper
-search = DuckDuckGoSearchAPIWrapper()
 
-tools = [
-    Tool(
-        name="Search",
-        func=search.run,
-        description="Useful for searching real-time information from the internet"
+st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄")
+st.title("📄 AI PDF Chatbot")
+
+# Chat Memory
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Show previous messages
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+
+# Process PDFs
+
+@st.cache_resource
+def process_pdfs(files):
+
+    documents = []
+
+    for file in files:
+
+        with open(file.name, "wb") as f:
+            f.write(file.read())
+
+        loader = PyPDFLoader(file.name)
+        documents.extend(loader.load())
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100
     )
-]
 
-# Create Agent
-agent = initialize_agent(
-    tools=tools,
-    llm=llm,
-    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    verbose=True
+    docs = splitter.split_documents(documents)
+
+    embeddings = HuggingFaceEndpointEmbeddings(
+        model="BAAI/bge-small-en",
+        huggingfacehub_api_token=st.secrets["HF_TOKEN"]
+    )
+
+    vectorstore = Chroma.from_documents(
+        docs,
+        embedding=embeddings
+    )
+
+    retriever = vectorstore.as_retriever(search_kwargs={"k":4})
+
+    return retriever
+
+# Upload PDFs
+
+uploaded_files = st.file_uploader(
+    "Upload PDFs",
+    type="pdf",
+    accept_multiple_files=True
 )
 
-# Run Agent
-response = agent.run("Latest AI research trends in 2026?")
-print("\nFinal Answer:\n")
-print(response)
+if uploaded_files:
+
+    with st.spinner("Indexing PDFs..."):
+        retriever = process_pdfs(uploaded_files)
+
+    # LLM
+
+    llm = ChatGroq(
+        groq_api_key=st.secrets["GROQ_API_KEY"],
+        model="llama-3.3-70b-versatile",
+        streaming=True
+    )
+
+    system_prompt = (
+        "Use the following context to answer the question."
+        "If you don't know the answer, say you don't know.\n\n"
+        "{context}"
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("human", "{input}\n\nChat History:\n{chat_history}")
+        ]
+    )
+
+    qa_chain = create_stuff_documents_chain(llm, prompt)
+
+    rag_chain = create_retrieval_chain(
+        retriever,
+        qa_chain
+    )
+
+    # Chat Input
+
+
+    question = st.chat_input("Ask something about the PDFs")
+
+    if question:
+
+        st.session_state.messages.append(
+            {"role": "user", "content": question}
+        )
+
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+
+            placeholder = st.empty()
+            answer = ""
+
+            chat_history = "\n".join(
+                [f"{m['role']}: {m['content']}" for m in st.session_state.messages]
+            )
+
+            with st.spinner("Thinking..."):
+
+                response = rag_chain.invoke(
+                    {
+                        "input": question,
+                        "chat_history": chat_history
+                    }
+                )
+
+                full_answer = response["answer"]
+
+                # Streaming effect
+                for word in full_answer.split():
+                    answer += word + " "
+                    placeholder.markdown(answer)
+
+        st.session_state.messages.append(
+            {"role": "assistant", "content": answer}
+        )
+        # Sources
+        with st.expander("📚 Sources"):
+
+            for doc in response["context"]:
+                st.write(
+                    f"Page: {doc.metadata.get('page')} | Source: {doc.metadata.get('source')}"
+                )
