@@ -5,8 +5,6 @@ The system uses **Retrieval-Augmented Generation (RAG)** with modern LLMs to pro
 
 ---
 
-# Live Streamlit Deploy Link:(https://smartpdfai.streamlit.app/)
-
 # 🚀 Features
 
 * 📂 **Multiple PDF Upload**
