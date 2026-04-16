@@ -1,12 +1,12 @@
 import streamlit as st
+import os
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
-
-from langchain_community.chains import create_retrieval_chain
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,22 +16,26 @@ from langchain_groq import ChatGroq
 st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄")
 st.title("📄 AI PDF Chatbot")
 
-
 # Chat Memory
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Show previous messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 
 # Process PDFs
+
 @st.cache_resource
 def process_pdfs(files):
+
     documents = []
 
     for file in files:
+
         with open(file.name, "wb") as f:
             f.write(file.read())
 
@@ -45,9 +49,9 @@ def process_pdfs(files):
 
     docs = splitter.split_documents(documents)
 
-    # ✅ LOCAL embeddings (NO HF API issue)
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
+    embeddings = HuggingFaceEndpointEmbeddings(
+        model="BAAI/bge-small-en",
+        huggingfacehub_api_token=st.secrets["HF_TOKEN"]
     )
 
     vectorstore = Chroma.from_documents(
@@ -55,16 +59,17 @@ def process_pdfs(files):
         embedding=embeddings
     )
 
-    return vectorstore.as_retriever(search_kwargs={"k": 4})
+    retriever = vectorstore.as_retriever(search_kwargs={"k":4})
 
+    return retriever
 
 # Upload PDFs
+
 uploaded_files = st.file_uploader(
     "Upload PDFs",
     type="pdf",
     accept_multiple_files=True
 )
-
 
 if uploaded_files:
 
@@ -72,14 +77,15 @@ if uploaded_files:
         retriever = process_pdfs(uploaded_files)
 
     # LLM
+
     llm = ChatGroq(
         groq_api_key=st.secrets["GROQ_API_KEY"],
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",
         streaming=True
     )
 
     system_prompt = (
-        "Use the following context to answer the question. "
+        "Use the following context to answer the question."
         "If you don't know the answer, say you don't know.\n\n"
         "{context}"
     )
@@ -97,6 +103,9 @@ if uploaded_files:
         retriever,
         qa_chain
     )
+
+    # Chat Input
+
 
     question = st.chat_input("Ask something about the PDFs")
 
@@ -120,13 +129,16 @@ if uploaded_files:
 
             with st.spinner("Thinking..."):
 
-                response = rag_chain.invoke({
-                    "input": question,
-                    "chat_history": chat_history
-                })
+                response = rag_chain.invoke(
+                    {
+                        "input": question,
+                        "chat_history": chat_history
+                    }
+                )
 
                 full_answer = response["answer"]
 
+                # Streaming effect
                 for word in full_answer.split():
                     answer += word + " "
                     placeholder.markdown(answer)
@@ -134,9 +146,9 @@ if uploaded_files:
         st.session_state.messages.append(
             {"role": "assistant", "content": answer}
         )
-
         # Sources
         with st.expander("📚 Sources"):
+
             for doc in response["context"]:
                 st.write(
                     f"Page: {doc.metadata.get('page')} | Source: {doc.metadata.get('source')}"
